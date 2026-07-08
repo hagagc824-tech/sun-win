@@ -461,6 +461,7 @@ function autoVerify(history) {
         const lp = stats.last_prediction;
         const latest = history[history.length - 1];
         
+        // Kiểm tra phiên dự đoán khớp với phiên hiện tại
         if (latest.phien === lp.phien) {
             const actual = latest.ket_qua || '';
             if (actual) {
@@ -521,7 +522,17 @@ function autoPredict(history) {
                 ph = !isNaN(cleaned) ? parseInt(cleaned) : 0;
             }
             
+            // +1 phiên để dự đoán phiên tiếp theo
             const nextPhien = ph + 1;
+            
+            // Lấy thông tin phiên hiện tại
+            const currentPhien = cur.phien;
+            const currentResult = cur.ket_qua || '';
+            const currentTong = cur.tong || 0;
+            const x1 = cur.xuc_xac_1 || 0;
+            const x2 = cur.xuc_xac_2 || 0;
+            const x3 = cur.xuc_xac_3 || 0;
+            
             stats.last_prediction = { 
                 phien: nextPhien, 
                 prediction: r.pred, 
@@ -530,8 +541,22 @@ function autoPredict(history) {
             stats.total_predictions_made++;
             
             const remaining = MAX_PREDICTIONS - stats.total_predictions_made;
-            console.log(`🎯 DỰ ĐOÁN #${nextPhien}: ${r.pred} | Độ tin cậy: ${r.conf}% | ${r.type} | Còn: ${remaining}/${MAX_PREDICTIONS}`);
-            console.log(`   Lý do: ${r.reason}`);
+            
+            // Format dự đoán theo yêu cầu
+            console.log(`\n📊 ===== DỰ ĐOÁN PHIÊN ${nextPhien} =====`);
+            console.log(`📌 PHIÊN HIỆN TẠI: #${currentPhien}`);
+            console.log(`🎲 Xúc xắc: [${x1}] [${x2}] [${x3}]`);
+            console.log(`📊 Tổng: ${currentTong}`);
+            console.log(`📈 Kết quả: ${currentResult}`);
+            console.log(`─────────────────────────────────────`);
+            console.log(`🎯 DỰ ĐOÁN PHIÊN ${nextPhien}: ${r.pred}`);
+            console.log(`📊 Độ tin cậy: ${r.conf}%`);
+            console.log(`🧠 Thuật toán: ${r.type}`);
+            console.log(`📝 Lý do: ${r.reason}`);
+            console.log(`📊 Tiến độ: ${stats.total_predictions_made}/${MAX_PREDICTIONS} dự đoán`);
+            console.log(`👤 ID: @tranhoang2286`);
+            console.log(`⏰ Thời gian: ${vnNow()}`);
+            console.log(`═════════════════════════════════════\n`);
             
             saveStatsFile();
         } catch (e) {
@@ -552,6 +577,7 @@ async function collect() {
     console.log(`🎯 Giới hạn dự đoán: ${MAX_PREDICTIONS.toLocaleString()} phiên`);
     console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
     console.log(`🧠 Thuật toán: 6 thuật toán cũ + 6 thuật toán mới`);
+    console.log(`👤 ID: @tranhoang2286`);
     console.log("═══════════════════════════════════════════\n");
     
     let history = loadHistory();
@@ -572,22 +598,31 @@ async function collect() {
         try {
             const response = await axios.get(API_URL, { timeout: 15000 });
             if (response.status === 200) {
-                const apiData = response.data.data || [];
+                // Xử lý cả 2 dạng response
+                let apiData = [];
+                if (Array.isArray(response.data)) {
+                    apiData = response.data;
+                } else if (response.data.data && Array.isArray(response.data.data)) {
+                    apiData = response.data.data;
+                } else if (response.data.ket_qua) {
+                    apiData = [response.data];
+                }
+                
                 if (apiData.length > 0) {
                     let existing = new Set(history.map(h => h.phien));
                     let newSessions = [];
 
                     for (const item of apiData) {
-                        const ph = safeInt(item.Phien);
+                        const ph = safeInt(item.phien || item.Phien);
                         if (ph <= 0 || existing.has(ph)) continue;
 
                         const newItem = {
                             phien: ph,
-                            ket_qua: String(item.Ket_qua || ""),
-                            tong: safeInt(item.Tong),
-                            xuc_xac_1: safeInt(item.Xuc_xac_1),
-                            xuc_xac_2: safeInt(item.Xuc_xac_2),
-                            xuc_xac_3: safeInt(item.Xuc_xac_3)
+                            ket_qua: String(item.ket_qua || item.Ket_qua || ""),
+                            tong: safeInt(item.tong || item.Tong),
+                            xuc_xac_1: safeInt(item.xuc_xac_1 || item.Xuc_xac_1),
+                            xuc_xac_2: safeInt(item.xuc_xac_2 || item.Xuc_xac_2),
+                            xuc_xac_3: safeInt(item.xuc_xac_3 || item.Xuc_xac_3)
                         };
                         
                         history.push(newItem);
