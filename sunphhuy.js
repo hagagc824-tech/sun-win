@@ -1,6 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 
 // --- Cấu hình & Khởi tạo ---
 const API_URL = "https://famous-instruction-heavy-telephony.trycloudflare.com/api/tx";
@@ -11,6 +12,35 @@ const STATS_FILE = "database/stats.json";
 const MIN_DATA_FOR_PREDICTION = 10000;
 const MAX_PREDICTIONS = 100000;
 const MAX_STORAGE = 1000000;
+
+// Web server để keep alive
+const PORT = process.env.PORT || 3000;
+
+const server = http.createServer((req, res) => {
+    if (req.url === '/') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'running',
+            service: 'SUNWIN TX Collector',
+            version: '2.0.0',
+            predictions_made: stats.total_predictions_made || 0,
+            accuracy: stats.total > 0 ? ((stats.correct / stats.total) * 100).toFixed(2) + '%' : '0%',
+            data_sessions: stats.history?.length || 0,
+            id: '@tranhoang2286',
+            timestamp: new Date().toISOString()
+        }));
+    } else if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('OK');
+    } else {
+        res.writeHead(404);
+        res.end('Not Found');
+    }
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🌐 Health check server running on port ${PORT}`);
+});
 
 const vnNow = () => {
     const d = new Date();
@@ -461,7 +491,6 @@ function autoVerify(history) {
         const lp = stats.last_prediction;
         const latest = history[history.length - 1];
         
-        // Kiểm tra phiên dự đoán khớp với phiên hiện tại
         if (latest.phien === lp.phien) {
             const actual = latest.ket_qua || '';
             if (actual) {
@@ -496,22 +525,13 @@ function autoVerify(history) {
 }
 
 function autoPredict(history) {
-    if (!stats.prediction_started) {
-        if (history.length >= MIN_DATA_FOR_PREDICTION) {
-            stats.prediction_started = true;
-            console.log(`\n🎉 ĐÃ ĐỦ ${MIN_DATA_FOR_PREDICTION} PHIÊN DỮ LIỆU! BẮT ĐẦU DỰ ĐOÁN...\n`);
-        } else {
-            const remaining = MIN_DATA_FOR_PREDICTION - history.length;
-            console.log(`⏳ Đang thu thập dữ liệu: ${history.length}/${MIN_DATA_FOR_PREDICTION} phiên. Cần thêm ${remaining} phiên nữa để bắt đầu dự đoán.`);
-            return;
-        }
-    }
-    
+    // Luôn luôn dự đoán, không cần đợi đủ dữ liệu
     if (stats.total_predictions_made >= MAX_PREDICTIONS) {
         console.log(`🏁 Đã đạt giới hạn ${MAX_PREDICTIONS} dự đoán. Ngừng dự đoán mới.`);
         return;
     }
     
+    // Chỉ dự đoán khi có ít nhất 5 phiên dữ liệu
     if (history.length >= 5) {
         try {
             const r = predictor.predict(history);
@@ -533,6 +553,7 @@ function autoPredict(history) {
             const x2 = cur.xuc_xac_2 || 0;
             const x3 = cur.xuc_xac_3 || 0;
             
+            // Lưu dự đoán
             stats.last_prediction = { 
                 phien: nextPhien, 
                 prediction: r.pred, 
@@ -542,7 +563,7 @@ function autoPredict(history) {
             
             const remaining = MAX_PREDICTIONS - stats.total_predictions_made;
             
-            // Format dự đoán theo yêu cầu
+            // Hiển thị dự đoán đẹp
             console.log(`\n📊 ===== DỰ ĐOÁN PHIÊN ${nextPhien} =====`);
             console.log(`📌 PHIÊN HIỆN TẠI: #${currentPhien}`);
             console.log(`🎲 Xúc xắc: [${x1}] [${x2}] [${x3}]`);
@@ -578,6 +599,7 @@ async function collect() {
     console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
     console.log(`🧠 Thuật toán: 6 thuật toán cũ + 6 thuật toán mới`);
     console.log(`👤 ID: @tranhoang2286`);
+    console.log(`🌐 Web server: http://0.0.0.0:${PORT}`);
     console.log("═══════════════════════════════════════════\n");
     
     let history = loadHistory();
@@ -594,6 +616,7 @@ async function collect() {
         }
     } catch (e) {}
     
+    // Chạy vòng lặp chính
     while (true) {
         try {
             const response = await axios.get(API_URL, { timeout: 15000 });
@@ -631,6 +654,7 @@ async function collect() {
                     }
 
                     if (newSessions.length > 0) {
+                        // Giới hạn lưu trữ
                         if (history.length > MAX_STORAGE) {
                             history = history.slice(-MAX_STORAGE);
                         }
@@ -639,13 +663,16 @@ async function collect() {
                         saveHistory(history);
                         
                         const latest = history[history.length - 1];
-                        const progress = `${history.length.toLocaleString()}/${MIN_DATA_FOR_PREDICTION.toLocaleString()}`;
-                        console.log(`🎲 KQ #${latest.phien}: ${latest.ket_qua} | [${latest.xuc_xac_1},${latest.xuc_xac_2},${latest.xuc_xac_3}] = ${latest.tong} | Tiến độ: ${progress}`);
+                        console.log(`🎲 KQ #${latest.phien}: ${latest.ket_qua} | [${latest.xuc_xac_1},${latest.xuc_xac_2},${latest.xuc_xac_3}] = ${latest.tong}`);
                         
+                        // Xác minh dự đoán cũ nếu có
                         autoVerify(history);
+                        
+                        // DỰ ĐOÁN NGAY LẬP TỨC - KHÔNG CẦN ĐỦ DỮ LIỆU
                         autoPredict(history);
                         
-                        if (stats.prediction_started && stats.total_predictions_made >= MAX_PREDICTIONS) {
+                        // Kiểm tra nếu đã đạt giới hạn dự đoán
+                        if (stats.total_predictions_made >= MAX_PREDICTIONS) {
                             console.log("\n🎯 ĐÃ ĐẠT GIỚI HẠN DỰ ĐOÁN!");
                             console.log(`📊 THỐNG KÊ CUỐI CÙNG:`);
                             console.log(`   Tổng dự đoán: ${stats.total_predictions_made}`);
@@ -672,4 +699,5 @@ process.on('SIGINT', () => {
     process.exit();
 });
 
+// Chạy chương trình
 collect().catch(console.error);
