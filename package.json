@@ -1,0 +1,27 @@
+{
+  "name": "sunwin-tx-collector",
+  "version": "2.0.0",
+  "description": "SUNWIN TX Collector with Advanced Prediction Algorithms",
+  "main": "sunphhuy.js",
+  "scripts": {
+    "start": "node sunphhuy.js",
+    "dev": "nodemon sunphhuy.js"
+  },
+  "keywords": [
+    "sunwin",
+    "tx",
+    "prediction",
+    "collector",
+    "algorithm"
+  ],
+  "author": "SunWin TX Collector",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
