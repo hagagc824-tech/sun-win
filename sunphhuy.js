@@ -11,7 +11,7 @@ const STATS_FILE = "database/stats.json";
 const PREDICTIONS_FILE = "database/predictions.json";
 
 // Các giới hạn
-const MIN_DATA_FOR_PREDICTION = 1000;
+const MIN_DATA_FOR_PREDICTION = 5; // Chỉ cần 5 phiên để dự đoán
 const MAX_PREDICTIONS = 100000;
 const MAX_STORAGE = 1000000;
 
@@ -530,21 +530,11 @@ function autoVerify(history) {
 }
 
 function makePrediction(history) {
-    // Kiểm tra dữ liệu tối thiểu
-    if (history.length < 5) {
-        return {
-            error: true,
-            message: "Chưa đủ dữ liệu để dự đoán (cần ít nhất 5 phiên)",
-            data_sessions: history.length,
-            required: 5
-        };
-    }
-    
-    // Kiểm tra đủ 1000 phiên
+    // Chỉ cần 5 phiên là dự đoán được
     if (history.length < MIN_DATA_FOR_PREDICTION) {
         return {
             error: true,
-            message: `Chưa đủ ${MIN_DATA_FOR_PREDICTION} phiên dữ liệu (hiện có ${history.length} phiên)`,
+            message: `Chưa đủ ${MIN_DATA_FOR_PREDICTION} phiên dữ liệu để dự đoán (hiện có ${history.length} phiên)`,
             data_sessions: history.length,
             required: MIN_DATA_FOR_PREDICTION
         };
@@ -587,22 +577,18 @@ function makePrediction(history) {
         };
         saveStatsFile();
         
+        // Format JSON theo yêu cầu
         return {
-            success: true,
-            prediction: r.pred,
-            confidence: r.conf,
-            algorithm: r.type,
-            reason: r.reason,
-            current_phien: cur.phien,
-            current_result: cur.ket_qua,
-            current_tong: cur.tong,
-            xuc_xac: [cur.xuc_xac_1, cur.xuc_xac_2, cur.xuc_xac_3],
-            next_phien: nextPhien,
-            total_predictions: stats.total_predictions_made,
-            data_sessions: history.length,
-            required: MIN_DATA_FOR_PREDICTION,
-            id: "@tranhoang2286",
-            timestamp: vnNow()
+            "phiên": cur.phien,
+            "xúc xắc 1": cur.xuc_xac_1 || 0,
+            "xúc xắc 2": cur.xuc_xac_2 || 0,
+            "xúc xắc 3": cur.xuc_xac_3 || 0,
+            "tổng": cur.tong || 0,
+            "kết quả": cur.ket_qua || "",
+            "phiên dự đoán": nextPhien,
+            "dự đoán": r.pred,
+            "tỉ lệ": r.conf + "%",
+            "id": "@tranhoang2286"
         };
     } catch (e) {
         return {
@@ -724,7 +710,7 @@ function safeInt(v, d = 0) {
 async function collect() {
     console.log("🚀 SUNWIN TX COLLECTOR - KHỞI ĐỘNG");
     console.log("═══════════════════════════════════════════");
-    console.log(`📊 Yêu cầu dữ liệu tối thiểu: ${MIN_DATA_FOR_PREDICTION.toLocaleString()} phiên`);
+    console.log(`📊 Yêu cầu dữ liệu tối thiểu: ${MIN_DATA_FOR_PREDICTION} phiên`);
     console.log(`🎯 Giới hạn dự đoán: ${MAX_PREDICTIONS.toLocaleString()} phiên`);
     console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
     console.log(`🧠 Thuật toán: 6 thuật toán cũ + 6 thuật toán mới`);
