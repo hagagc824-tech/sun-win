@@ -11,7 +11,7 @@ const STATS_FILE = "database/stats.json";
 const PREDICTIONS_FILE = "database/predictions.json";
 
 // Các giới hạn
-const MIN_DATA_FOR_PREDICTION = 1000; // Giảm xuống 1000
+const MIN_DATA_FOR_PREDICTION = 1000;
 const MAX_PREDICTIONS = 100000;
 const MAX_STORAGE = 1000000;
 
@@ -482,7 +482,6 @@ function savePredictions(predictions) {
     const dir = path.dirname(PREDICTIONS_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     
-    // Giới hạn lưu 500 dự đoán gần nhất
     const limitedPredictions = predictions.slice(-500);
     
     fs.writeFileSync(PREDICTIONS_FILE, JSON.stringify({
@@ -521,7 +520,7 @@ function autoVerify(history) {
                 if (stats.history.length > 500) stats.history = stats.history.slice(-500);
                 
                 const acc = ((stats.correct / Math.max(stats.total, 1)) * 100).toFixed(1);
-                console.log(`🔍 VERIFY #${latest.phien}: ${ok ? '✅ ĐÚNG' : '❌ SAI'} | Tỷ lệ: ${acc}% (${stats.correct}/${stats.total})`);
+                console.log(`🔍 XÁC MINH #${latest.phien}: ${ok ? '✅ ĐÚNG' : '❌ SAI'} | Tỷ lệ: ${acc}% (${stats.correct}/${stats.total})`);
                 
                 stats.last_prediction = null;
                 saveStatsFile();
@@ -531,13 +530,17 @@ function autoVerify(history) {
 }
 
 function makePrediction(history) {
+    // Kiểm tra dữ liệu tối thiểu
     if (history.length < 5) {
         return {
             error: true,
-            message: "Chưa đủ dữ liệu để dự đoán (cần ít nhất 5 phiên)"
+            message: "Chưa đủ dữ liệu để dự đoán (cần ít nhất 5 phiên)",
+            data_sessions: history.length,
+            required: 5
         };
     }
     
+    // Kiểm tra đủ 1000 phiên
     if (history.length < MIN_DATA_FOR_PREDICTION) {
         return {
             error: true,
@@ -597,6 +600,7 @@ function makePrediction(history) {
             next_phien: nextPhien,
             total_predictions: stats.total_predictions_made,
             data_sessions: history.length,
+            required: MIN_DATA_FOR_PREDICTION,
             id: "@tranhoang2286",
             timestamp: vnNow()
         };
@@ -629,7 +633,7 @@ const server = http.createServer((req, res) => {
         const history = loadHistory();
         const result = makePrediction(history);
         
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(result, null, 2));
         return;
     }
@@ -640,7 +644,7 @@ const server = http.createServer((req, res) => {
         const predictions = loadPredictions();
         const recent = predictions.slice(-limit);
         
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
             success: true,
             total: predictions.length,
@@ -654,7 +658,7 @@ const server = http.createServer((req, res) => {
     if (pathname === '/api/lonsun/stats' && req.method === 'GET') {
         const history = loadHistory();
         
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
             success: true,
             data_sessions: history.length,
@@ -674,7 +678,7 @@ const server = http.createServer((req, res) => {
     // Trang chủ - health check
     if (pathname === '/') {
         const history = loadHistory();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
             status: 'running',
             service: 'SUNWIN TX Collector',
@@ -695,20 +699,20 @@ const server = http.createServer((req, res) => {
     }
     
     // 404
-    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
         error: true,
-        message: 'Endpoint not found',
+        message: 'Không tìm thấy endpoint',
         available: ['/api/lonsun/tx', '/api/lonsun/history', '/api/lonsun/stats']
     }, null, 2));
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Server running on port ${PORT}`);
-    console.log(`📊 API Endpoints:`);
-    console.log(`   GET /api/lonsun/tx - Dự đoán`);
-    console.log(`   GET /api/lonsun/history - Lịch sử dự đoán`);
-    console.log(`   GET /api/lonsun/stats - Thống kê`);
+    console.log(`🌐 Server đang chạy trên port ${PORT}`);
+    console.log(`📊 Các API:`);
+    console.log(`   GET /api/lonsun/tx - Dự đoán phiên tiếp theo`);
+    console.log(`   GET /api/lonsun/history - Xem lịch sử dự đoán`);
+    console.log(`   GET /api/lonsun/stats - Xem thống kê`);
 });
 
 function safeInt(v, d = 0) {
