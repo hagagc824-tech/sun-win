@@ -1,7 +1,7 @@
 {
   "name": "sunwin-tx-collector",
   "version": "2.0.0",
-  "description": "SUNWIN TX Collector with Advanced Prediction Algorithms",
+  "description": "SUNWIN TX Collector - Auto Predict After Each Data Collection",
   "main": "sunphhuy.js",
   "scripts": {
     "start": "node sunphhuy.js"
