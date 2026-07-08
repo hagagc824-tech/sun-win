@@ -2,45 +2,21 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const url = require('url');
 
 // --- Cấu hình & Khởi tạo ---
 const API_URL = "https://famous-instruction-heavy-telephony.trycloudflare.com/api/tx";
 const DATA_FILE = "collected_data/sunwin_tx.json";
 const STATS_FILE = "database/stats.json";
+const PREDICTIONS_FILE = "database/predictions.json";
 
 // Các giới hạn
-const MIN_DATA_FOR_PREDICTION = 10000;
+const MIN_DATA_FOR_PREDICTION = 1000; // Giảm xuống 1000
 const MAX_PREDICTIONS = 100000;
 const MAX_STORAGE = 1000000;
 
 // Web server để keep alive
 const PORT = process.env.PORT || 3000;
-
-const server = http.createServer((req, res) => {
-    if (req.url === '/') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            status: 'running',
-            service: 'SUNWIN TX Collector',
-            version: '2.0.0',
-            predictions_made: stats.total_predictions_made || 0,
-            accuracy: stats.total > 0 ? ((stats.correct / stats.total) * 100).toFixed(2) + '%' : '0%',
-            data_sessions: stats.history?.length || 0,
-            id: '@tranhoang2286',
-            timestamp: new Date().toISOString()
-        }));
-    } else if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('OK');
-    } else {
-        res.writeHead(404);
-        res.end('Not Found');
-    }
-});
-
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Health check server running on port ${PORT}`);
-});
 
 const vnNow = () => {
     const d = new Date();
@@ -55,6 +31,8 @@ let stats = {
     total_predictions_made: 0,
     prediction_started: false
 };
+
+let predictions_history = [];
 
 class TX_LogicPen_V4 {
     constructor() {
@@ -443,6 +421,7 @@ class TX_LogicPen_V4 {
 
 const predictor = new TX_LogicPen_V4();
 
+// --- HÀM LƯU DỮ LIỆU ---
 function loadHistory() {
     try {
         if (fs.existsSync(DATA_FILE)) {
@@ -486,6 +465,33 @@ function saveStatsFile() {
     }, null, 2));
 }
 
+function loadPredictions() {
+    try {
+        if (fs.existsSync(PREDICTIONS_FILE)) {
+            const content = fs.readFileSync(PREDICTIONS_FILE, 'utf-8');
+            const data = JSON.parse(content);
+            return data.predictions || [];
+        }
+    } catch (e) {
+        console.error(`Lỗi đọc file dự đoán: ${e.message}`);
+    }
+    return [];
+}
+
+function savePredictions(predictions) {
+    const dir = path.dirname(PREDICTIONS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    
+    // Giới hạn lưu 500 dự đoán gần nhất
+    const limitedPredictions = predictions.slice(-500);
+    
+    fs.writeFileSync(PREDICTIONS_FILE, JSON.stringify({
+        predictions: limitedPredictions,
+        total: limitedPredictions.length,
+        last_updated: vnNow()
+    }, null, 2));
+}
+
 function autoVerify(history) {
     if (stats.last_prediction && history.length > 0) {
         const lp = stats.last_prediction;
@@ -524,73 +530,193 @@ function autoVerify(history) {
     }
 }
 
-function autoPredict(history) {
-    // Luôn luôn dự đoán, không cần đợi đủ dữ liệu
-    if (stats.total_predictions_made >= MAX_PREDICTIONS) {
-        console.log(`🏁 Đã đạt giới hạn ${MAX_PREDICTIONS} dự đoán. Ngừng dự đoán mới.`);
+function makePrediction(history) {
+    if (history.length < 5) {
+        return {
+            error: true,
+            message: "Chưa đủ dữ liệu để dự đoán (cần ít nhất 5 phiên)"
+        };
+    }
+    
+    if (history.length < MIN_DATA_FOR_PREDICTION) {
+        return {
+            error: true,
+            message: `Chưa đủ ${MIN_DATA_FOR_PREDICTION} phiên dữ liệu (hiện có ${history.length} phiên)`,
+            data_sessions: history.length,
+            required: MIN_DATA_FOR_PREDICTION
+        };
+    }
+    
+    try {
+        const r = predictor.predict(history);
+        const cur = history[history.length - 1];
+        let ph = cur.phien || 0;
+        if (typeof ph === 'string') {
+            const cleaned = ph.replace('#', '');
+            ph = !isNaN(cleaned) ? parseInt(cleaned) : 0;
+        }
+        
+        const nextPhien = ph + 1;
+        
+        // Lưu dự đoán vào lịch sử
+        const prediction_record = {
+            phien: nextPhien,
+            prediction: r.pred,
+            confidence: r.conf,
+            algorithm: r.type,
+            reason: r.reason,
+            current_phien: cur.phien,
+            current_result: cur.ket_qua,
+            current_tong: cur.tong,
+            xuc_xac: [cur.xuc_xac_1, cur.xuc_xac_2, cur.xuc_xac_3],
+            timestamp: vnNow()
+        };
+        
+        predictions_history.push(prediction_record);
+        savePredictions(predictions_history);
+        
+        // Cập nhật stats
+        stats.total_predictions_made++;
+        stats.last_prediction = {
+            phien: nextPhien,
+            prediction: r.pred,
+            confidence: r.conf
+        };
+        saveStatsFile();
+        
+        return {
+            success: true,
+            prediction: r.pred,
+            confidence: r.conf,
+            algorithm: r.type,
+            reason: r.reason,
+            current_phien: cur.phien,
+            current_result: cur.ket_qua,
+            current_tong: cur.tong,
+            xuc_xac: [cur.xuc_xac_1, cur.xuc_xac_2, cur.xuc_xac_3],
+            next_phien: nextPhien,
+            total_predictions: stats.total_predictions_made,
+            data_sessions: history.length,
+            id: "@tranhoang2286",
+            timestamp: vnNow()
+        };
+    } catch (e) {
+        return {
+            error: true,
+            message: `Lỗi dự đoán: ${e.message}`
+        };
+    }
+}
+
+// --- TẠO WEB SERVER VỚI API ---
+const server = http.createServer((req, res) => {
+    const parsedUrl = url.parse(req.url, true);
+    const pathname = parsedUrl.pathname;
+    
+    // CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    
+    if (req.method === 'OPTIONS') {
+        res.writeHead(200);
+        res.end();
         return;
     }
     
-    // Chỉ dự đoán khi có ít nhất 5 phiên dữ liệu
-    if (history.length >= 5) {
-        try {
-            const r = predictor.predict(history);
-            const cur = history[history.length - 1];
-            let ph = cur.phien || 0;
-            if (typeof ph === 'string') {
-                const cleaned = ph.replace('#', '');
-                ph = !isNaN(cleaned) ? parseInt(cleaned) : 0;
-            }
-            
-            // +1 phiên để dự đoán phiên tiếp theo
-            const nextPhien = ph + 1;
-            
-            // Lấy thông tin phiên hiện tại
-            const currentPhien = cur.phien;
-            const currentResult = cur.ket_qua || '';
-            const currentTong = cur.tong || 0;
-            const x1 = cur.xuc_xac_1 || 0;
-            const x2 = cur.xuc_xac_2 || 0;
-            const x3 = cur.xuc_xac_3 || 0;
-            
-            // Lưu dự đoán
-            stats.last_prediction = { 
-                phien: nextPhien, 
-                prediction: r.pred, 
-                confidence: r.conf 
-            };
-            stats.total_predictions_made++;
-            
-            const remaining = MAX_PREDICTIONS - stats.total_predictions_made;
-            
-            // Hiển thị dự đoán đẹp
-            console.log(`\n📊 ===== DỰ ĐOÁN PHIÊN ${nextPhien} =====`);
-            console.log(`📌 PHIÊN HIỆN TẠI: #${currentPhien}`);
-            console.log(`🎲 Xúc xắc: [${x1}] [${x2}] [${x3}]`);
-            console.log(`📊 Tổng: ${currentTong}`);
-            console.log(`📈 Kết quả: ${currentResult}`);
-            console.log(`─────────────────────────────────────`);
-            console.log(`🎯 DỰ ĐOÁN PHIÊN ${nextPhien}: ${r.pred}`);
-            console.log(`📊 Độ tin cậy: ${r.conf}%`);
-            console.log(`🧠 Thuật toán: ${r.type}`);
-            console.log(`📝 Lý do: ${r.reason}`);
-            console.log(`📊 Tiến độ: ${stats.total_predictions_made}/${MAX_PREDICTIONS} dự đoán`);
-            console.log(`👤 ID: @tranhoang2286`);
-            console.log(`⏰ Thời gian: ${vnNow()}`);
-            console.log(`═════════════════════════════════════\n`);
-            
-            saveStatsFile();
-        } catch (e) {
-            console.error(`Lỗi dự đoán: ${e.message}`);
-        }
+    // API dự đoán chính
+    if (pathname === '/api/lonsun/tx' && req.method === 'GET') {
+        const history = loadHistory();
+        const result = makePrediction(history);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result, null, 2));
+        return;
     }
-}
+    
+    // API lấy lịch sử dự đoán
+    if (pathname === '/api/lonsun/history' && req.method === 'GET') {
+        const limit = parseInt(parsedUrl.query.limit) || 50;
+        const predictions = loadPredictions();
+        const recent = predictions.slice(-limit);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            total: predictions.length,
+            predictions: recent,
+            id: "@tranhoang2286"
+        }, null, 2));
+        return;
+    }
+    
+    // API lấy thống kê
+    if (pathname === '/api/lonsun/stats' && req.method === 'GET') {
+        const history = loadHistory();
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            success: true,
+            data_sessions: history.length,
+            min_required: MIN_DATA_FOR_PREDICTION,
+            predictions_made: stats.total_predictions_made,
+            max_predictions: MAX_PREDICTIONS,
+            accuracy: stats.total > 0 ? ((stats.correct / stats.total) * 100).toFixed(2) + '%' : '0%',
+            correct: stats.correct,
+            wrong: stats.wrong,
+            total_verified: stats.total,
+            id: "@tranhoang2286",
+            timestamp: vnNow()
+        }, null, 2));
+        return;
+    }
+    
+    // Trang chủ - health check
+    if (pathname === '/') {
+        const history = loadHistory();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'running',
+            service: 'SUNWIN TX Collector',
+            version: '2.0.0',
+            predictions_made: stats.total_predictions_made || 0,
+            accuracy: stats.total > 0 ? ((stats.correct / stats.total) * 100).toFixed(2) + '%' : '0%',
+            data_sessions: history.length,
+            min_required: MIN_DATA_FOR_PREDICTION,
+            api_endpoints: [
+                '/api/lonsun/tx - Dự đoán phiên tiếp theo',
+                '/api/lonsun/history - Lịch sử dự đoán',
+                '/api/lonsun/stats - Thống kê'
+            ],
+            id: '@tranhoang2286',
+            timestamp: vnNow()
+        }, null, 2));
+        return;
+    }
+    
+    // 404
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+        error: true,
+        message: 'Endpoint not found',
+        available: ['/api/lonsun/tx', '/api/lonsun/history', '/api/lonsun/stats']
+    }, null, 2));
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🌐 Server running on port ${PORT}`);
+    console.log(`📊 API Endpoints:`);
+    console.log(`   GET /api/lonsun/tx - Dự đoán`);
+    console.log(`   GET /api/lonsun/history - Lịch sử dự đoán`);
+    console.log(`   GET /api/lonsun/stats - Thống kê`);
+});
 
 function safeInt(v, d = 0) {
     const parsed = parseInt(v);
     return isNaN(parsed) ? d : parsed;
 }
 
+// --- COLLECTOR CHẠY NỀN ---
 async function collect() {
     console.log("🚀 SUNWIN TX COLLECTOR - KHỞI ĐỘNG");
     console.log("═══════════════════════════════════════════");
@@ -599,29 +725,30 @@ async function collect() {
     console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
     console.log(`🧠 Thuật toán: 6 thuật toán cũ + 6 thuật toán mới`);
     console.log(`👤 ID: @tranhoang2286`);
-    console.log(`🌐 Web server: http://0.0.0.0:${PORT}`);
+    console.log(`🌐 API: http://0.0.0.0:${PORT}/api/lonsun/tx`);
     console.log("═══════════════════════════════════════════\n");
     
+    // Tải dữ liệu
     let history = loadHistory();
+    predictions_history = loadPredictions();
+    
     console.log(`📚 Đã tải ${history.length.toLocaleString()} phiên dữ liệu hiện có`);
+    console.log(`📚 Đã tải ${predictions_history.length} dự đoán đã lưu`);
     
     try {
         if (fs.existsSync(STATS_FILE)) {
             const savedStats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf-8'));
             stats = { ...stats, ...savedStats };
-            if (stats.prediction_started) {
-                console.log(`📈 Đã dự đoán ${stats.total_predictions_made.toLocaleString()}/${MAX_PREDICTIONS.toLocaleString()} phiên`);
-                console.log(`📊 Tỷ lệ đúng: ${((stats.correct/Math.max(stats.total,1))*100).toFixed(1)}% (${stats.correct}/${stats.total})\n`);
-            }
+            console.log(`📈 Đã dự đoán ${stats.total_predictions_made.toLocaleString()}/${MAX_PREDICTIONS.toLocaleString()} phiên`);
+            console.log(`📊 Tỷ lệ đúng: ${((stats.correct/Math.max(stats.total,1))*100).toFixed(1)}% (${stats.correct}/${stats.total})\n`);
         }
     } catch (e) {}
     
-    // Chạy vòng lặp chính
+    // Vòng lặp thu thập dữ liệu
     while (true) {
         try {
             const response = await axios.get(API_URL, { timeout: 15000 });
             if (response.status === 200) {
-                // Xử lý cả 2 dạng response
                 let apiData = [];
                 if (Array.isArray(response.data)) {
                     apiData = response.data;
@@ -654,7 +781,6 @@ async function collect() {
                     }
 
                     if (newSessions.length > 0) {
-                        // Giới hạn lưu trữ
                         if (history.length > MAX_STORAGE) {
                             history = history.slice(-MAX_STORAGE);
                         }
@@ -663,30 +789,14 @@ async function collect() {
                         saveHistory(history);
                         
                         const latest = history[history.length - 1];
-                        console.log(`🎲 KQ #${latest.phien}: ${latest.ket_qua} | [${latest.xuc_xac_1},${latest.xuc_xac_2},${latest.xuc_xac_3}] = ${latest.tong}`);
+                        console.log(`🎲 KQ #${latest.phien}: ${latest.ket_qua} | [${latest.xuc_xac_1},${latest.xuc_xac_2},${latest.xuc_xac_3}] = ${latest.tong} | Tổng: ${history.length}`);
                         
-                        // Xác minh dự đoán cũ nếu có
                         autoVerify(history);
-                        
-                        // DỰ ĐOÁN NGAY LẬP TỨC - KHÔNG CẦN ĐỦ DỮ LIỆU
-                        autoPredict(history);
-                        
-                        // Kiểm tra nếu đã đạt giới hạn dự đoán
-                        if (stats.total_predictions_made >= MAX_PREDICTIONS) {
-                            console.log("\n🎯 ĐÃ ĐẠT GIỚI HẠN DỰ ĐOÁN!");
-                            console.log(`📊 THỐNG KÊ CUỐI CÙNG:`);
-                            console.log(`   Tổng dự đoán: ${stats.total_predictions_made}`);
-                            console.log(`   Đúng: ${stats.correct}`);
-                            console.log(`   Sai: ${stats.wrong}`);
-                            console.log(`   Tỷ lệ: ${((stats.correct/Math.max(stats.total,1))*100).toFixed(2)}%`);
-                            console.log("\n🛑 Kết thúc chương trình...");
-                            process.exit(0);
-                        }
                     }
                 }
             }
         } catch (e) {
-            console.error(`❌ Lỗi: ${e.message}`);
+            console.error(`❌ Lỗi collector: ${e.message}`);
         }
         await new Promise(resolve => setTimeout(resolve, 3000));
     }
@@ -695,7 +805,8 @@ async function collect() {
 process.on('SIGINT', () => {
     console.log("\n🛑 Đang dừng chương trình...");
     saveStatsFile();
-    console.log("✅ Đã lưu thống kê!");
+    savePredictions(predictions_history);
+    console.log("✅ Đã lưu thống kê và dự đoán!");
     process.exit();
 });
 
