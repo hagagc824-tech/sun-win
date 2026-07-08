@@ -8,9 +8,9 @@ const DATA_FILE = "collected_data/sunwin_tx.json";
 const STATS_FILE = "database/stats.json";
 
 // Các giới hạn
-const MIN_DATA_FOR_PREDICTION = 10000;  // Cần 10k phiên mới bắt đầu dự đoán
-const MAX_PREDICTIONS = 100000;          // Dự đoán tối đa 100k phiên
-const MAX_STORAGE = 1000000;             // Lưu trữ tối đa 1000k phiên
+const MIN_DATA_FOR_PREDICTION = 10000;
+const MAX_PREDICTIONS = 100000;
+const MAX_STORAGE = 1000000;
 
 const vnNow = () => {
     const d = new Date();
@@ -23,7 +23,7 @@ let stats = {
     start_time: vnNow(),
     history: [],
     total_predictions_made: 0,
-    prediction_started: false  // Đánh dấu đã bắt đầu dự đoán chưa
+    prediction_started: false
 };
 
 class TX_LogicPen_V4 {
@@ -132,8 +132,6 @@ class TX_LogicPen_V4 {
     }
 
     // --- THUẬT TOÁN MỚI (THÊM 100%) ---
-    
-    // 1. Thuật toán Fibonacci - Dựa trên dãy số Fibonacci
     fibonacciPrediction(arr) {
         if (arr.length < this.fibonacci_sequence.length) return null;
         
@@ -159,7 +157,6 @@ class TX_LogicPen_V4 {
         };
     }
     
-    // 2. Thuật toán Golden Ratio - Dựa trên tỷ lệ vàng
     goldenRatioPrediction(arr) {
         if (arr.length < 10) return null;
         
@@ -167,11 +164,9 @@ class TX_LogicPen_V4 {
         const tai_count = recent.filter(r => r === "TAI").length;
         const xiu_count = recent.filter(r => r === "XIU").length;
         
-        // Tỷ lệ vàng lý tưởng là ~0.618
         const ratio = tai_count / (tai_count + xiu_count);
         const golden_diff = Math.abs(ratio - (1 / this.golden_ratio));
         
-        // Nếu tỷ lệ gần với tỷ lệ vàng thì dự đoán theo xu hướng ngược
         if (golden_diff < 0.1) {
             const pred = tai_count > xiu_count ? "XIU" : "TAI";
             const conf = Math.round((1 - golden_diff) * 70 + 25);
@@ -185,11 +180,9 @@ class TX_LogicPen_V4 {
         return null;
     }
     
-    // 3. Thuật toán Markov Chain - Dựa trên xác suất chuyển tiếp
     markovChainPrediction(arr) {
         if (arr.length < 50) return null;
         
-        // Xây dựng ma trận chuyển tiếp
         let transitions = { TAI: { TAI: 0, XIU: 0 }, XIU: { TAI: 0, XIU: 0 } };
         
         for (let i = 0; i < arr.length - 1; i++) {
@@ -200,7 +193,6 @@ class TX_LogicPen_V4 {
             }
         }
         
-        // Tính xác suất
         const last = arr[0];
         if (!last || !transitions[last]) return null;
         
@@ -223,7 +215,6 @@ class TX_LogicPen_V4 {
         return null;
     }
     
-    // 4. Thuật toán Moving Average - Trung bình động có trọng số
     weightedMovingAverage(arr) {
         if (arr.length < 15) return null;
         
@@ -253,41 +244,34 @@ class TX_LogicPen_V4 {
         return null;
     }
     
-    // 5. Thuật toán Machine Learning đơn giản - Dựa trên nhiều yếu tố
     mlSimplePrediction(arr, points) {
         if (arr.length < 20 || points.length < 20) return null;
         
         let score = 0;
         let total_factors = 0;
         
-        // Factor 1: Xu hướng 5 phiên gần nhất
         const recent5 = arr.slice(0, 5);
         const tai_5 = recent5.filter(r => r === "TAI").length;
         const xiu_5 = 5 - tai_5;
         if (tai_5 >= 4) { score += 2; total_factors++; }
         if (xiu_5 >= 4) { score -= 2; total_factors++; }
         
-        // Factor 2: Tổng điểm
         const recent_points = points.slice(0, 5);
         const avg_points = recent_points.reduce((a, b) => a + b, 0) / recent_points.length;
         if (avg_points > 12) { score -= 1; total_factors++; }
         if (avg_points < 9) { score += 1; total_factors++; }
         
-        // Factor 3: Biến động
         const variance = recent_points.reduce((a, b) => a + Math.pow(b - avg_points, 2), 0) / recent_points.length;
-        if (variance < 5) { 
-            // Biến động thấp - dự đoán theo xu hướng
+        if (variance < 5) {
             const last = arr[0];
             if (last === "TAI") score += 1;
             else score -= 1;
             total_factors++;
         }
         
-        // Factor 4: Mẫu đảo chiều
         if (arr.length >= 6) {
             if (arr[0] === arr[1] && arr[2] === arr[3] && arr[4] === arr[5] && 
                 arr[0] !== arr[2] && arr[2] !== arr[4]) {
-                // Mẫu AABBCC - đảo chiều
                 const pred = arr[5] === "TAI" ? "XIU" : "TAI";
                 return {
                     pred: pred,
@@ -298,7 +282,6 @@ class TX_LogicPen_V4 {
             }
         }
         
-        // Quyết định dựa trên điểm số
         if (Math.abs(score) >= 2) {
             const pred = score > 0 ? "TAI" : "XIU";
             const conf = Math.round(Math.abs(score) * 20 + 55);
@@ -312,11 +295,9 @@ class TX_LogicPen_V4 {
         return null;
     }
     
-    // 6. Thuật toán Wave - Phân tích sóng
     waveAnalysis(arr) {
         if (arr.length < 8) return null;
         
-        // Phát hiện sóng lên/xuống
         let up_waves = 0, down_waves = 0;
         let current_wave = 0;
         
@@ -348,7 +329,6 @@ class TX_LogicPen_V4 {
         const points = this._points();
         if (arr.length < 2) return null;
         
-        // Thuật toán cũ
         const old_results = [
             this.phatHienMauLap(arr),
             this.cauNoi(arr),
@@ -358,7 +338,6 @@ class TX_LogicPen_V4 {
             this.duDoanVi()
         ];
         
-        // Thuật toán mới
         const new_results = [
             this.fibonacciPrediction(arr),
             this.goldenRatioPrediction(arr),
@@ -368,7 +347,6 @@ class TX_LogicPen_V4 {
             this.waveAnalysis(arr)
         ];
         
-        // Gộp tất cả kết quả
         let all_results = old_results.concat(new_results);
         all_results = all_results.filter(r => r !== null);
         
@@ -376,7 +354,6 @@ class TX_LogicPen_V4 {
             return { pred: arr[0], conf: 55, type: "Theo", reason: "Bám phiên cuối" };
         }
         
-        // Bỏ phiếu có trọng số
         let votes = { TAI: 0, XIU: 0 };
         let total_conf = 0;
         
@@ -386,13 +363,11 @@ class TX_LogicPen_V4 {
             total_conf += result.conf;
         }
         
-        // Chọn kết quả có số phiếu cao hơn
         const pred = votes.TAI >= votes.XIU ? "TAI" : "XIU";
         const avg_conf = Math.round(total_conf / all_results.length);
         const boost = Math.abs(votes.TAI - votes.XIU) * 30;
         const final_conf = Math.min(95, avg_conf + boost);
         
-        // Lấy loại và lý do từ kết quả có độ tin cậy cao nhất
         const best_result = all_results.reduce((a, b) => a.conf > b.conf ? a : b);
         
         return {
@@ -438,7 +413,6 @@ class TX_LogicPen_V4 {
 
 const predictor = new TX_LogicPen_V4();
 
-// --- Helper Functions ---
 function loadHistory() {
     try {
         if (fs.existsSync(DATA_FILE)) {
@@ -456,7 +430,6 @@ function saveHistory(history) {
     const dir = path.dirname(DATA_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     
-    // Giới hạn lưu trữ tối đa MAX_STORAGE phiên
     const limitedHistory = history.slice(-MAX_STORAGE);
     
     fs.writeFileSync(DATA_FILE, JSON.stringify({ 
@@ -522,7 +495,6 @@ function autoVerify(history) {
 }
 
 function autoPredict(history) {
-    // Chỉ dự đoán nếu đã có đủ dữ liệu
     if (!stats.prediction_started) {
         if (history.length >= MIN_DATA_FOR_PREDICTION) {
             stats.prediction_started = true;
@@ -534,7 +506,6 @@ function autoPredict(history) {
         }
     }
     
-    // Kiểm tra giới hạn dự đoán
     if (stats.total_predictions_made >= MAX_PREDICTIONS) {
         console.log(`🏁 Đã đạt giới hạn ${MAX_PREDICTIONS} dự đoán. Ngừng dự đoán mới.`);
         return;
@@ -574,7 +545,6 @@ function safeInt(v, d = 0) {
     return isNaN(parsed) ? d : parsed;
 }
 
-// --- Main Collector ---
 async function collect() {
     console.log("🚀 SUNWIN TX COLLECTOR - KHỞI ĐỘNG");
     console.log("═══════════════════════════════════════════");
@@ -584,11 +554,9 @@ async function collect() {
     console.log(`🧠 Thuật toán: 6 thuật toán cũ + 6 thuật toán mới`);
     console.log("═══════════════════════════════════════════\n");
     
-    // Tải dữ liệu hiện có
     let history = loadHistory();
     console.log(`📚 Đã tải ${history.length.toLocaleString()} phiên dữ liệu hiện có`);
     
-    // Khôi phục stats
     try {
         if (fs.existsSync(STATS_FILE)) {
             const savedStats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf-8'));
@@ -600,7 +568,6 @@ async function collect() {
         }
     } catch (e) {}
     
-    // Vòng lặp chính
     while (true) {
         try {
             const response = await axios.get(API_URL, { timeout: 15000 });
@@ -629,7 +596,6 @@ async function collect() {
                     }
 
                     if (newSessions.length > 0) {
-                        // Giới hạn lưu trữ
                         if (history.length > MAX_STORAGE) {
                             history = history.slice(-MAX_STORAGE);
                         }
@@ -644,7 +610,6 @@ async function collect() {
                         autoVerify(history);
                         autoPredict(history);
                         
-                        // Kiểm tra nếu đã đạt giới hạn dự đoán
                         if (stats.prediction_started && stats.total_predictions_made >= MAX_PREDICTIONS) {
                             console.log("\n🎯 ĐÃ ĐẠT GIỚI HẠN DỰ ĐOÁN!");
                             console.log(`📊 THỐNG KÊ CUỐI CÙNG:`);
@@ -665,7 +630,6 @@ async function collect() {
     }
 }
 
-// Xử lý tắt chương trình
 process.on('SIGINT', () => {
     console.log("\n🛑 Đang dừng chương trình...");
     saveStatsFile();
@@ -673,5 +637,4 @@ process.on('SIGINT', () => {
     process.exit();
 });
 
-// Chạy Collector
 collect().catch(console.error);
