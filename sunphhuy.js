@@ -9,11 +9,13 @@ const API_URL = "https://famous-instruction-heavy-telephony.trycloudflare.com/ap
 const DATA_FILE = "collected_data/sunwin_tx.json";
 const STATS_FILE = "database/stats.json";
 const PREDICTIONS_FILE = "database/predictions.json";
+const DELETION_LOG_FILE = "database/deletion_log.json";
 
 // Các giới hạn
-const MIN_DATA_FOR_PREDICTION = 5; // Chỉ cần 5 phiên để dự đoán
+const MIN_DATA_FOR_PREDICTION = 5;
 const MAX_PREDICTIONS = 100000;
 const MAX_STORAGE = 1000000;
+const DELETION_INTERVAL = 6 * 60 * 60 * 1000; // 6 giờ
 
 // Web server để keep alive
 const PORT = process.env.PORT || 3000;
@@ -29,11 +31,650 @@ let stats = {
     start_time: vnNow(),
     history: [],
     total_predictions_made: 0,
-    prediction_started: false
+    prediction_started: false,
+    total_deleted: 0,
+    last_deletion: null
 };
 
 let predictions_history = [];
 
+// ============================================================
+// 1. THUẬT TOÁN XÓA RANDOM NÂNG CẤP
+// ============================================================
+class RandomDeletionAlgorithm {
+    constructor() {
+        this.deletion_history = [];
+        this.last_deletion_time = null;
+        this.deletion_count = 0;
+        this.max_deletions_per_hour = 100;
+        this.smart_threshold = 0.7;
+        this.total_deleted_sessions = 0;
+        this.deletion_patterns = {
+            duplicates: 0,
+            outliers: 0,
+            low_quality: 0,
+            old_data: 0,
+            clusters: 0
+        };
+    }
+
+    // 1. Phân tích dữ liệu để xác định dữ liệu cần xóa thông minh
+    analyzeDataForDeletion(data) {
+        if (!data || data.length === 0) {
+            return { should_delete: false, reason: 'Không có dữ liệu' };
+        }
+
+        const analysis = {
+            total_records: data.length,
+            duplicate_patterns: this.findDuplicatePatterns(data),
+            outlier_scores: this.calculateOutlierScores(data),
+            temporal_clusters: this.findTemporalClusters(data),
+            quality_scores: this.calculateQualityScores(data),
+            deletion_candidates: [],
+            data_health_score: 0
+        };
+
+        // Xác định ứng viên xóa dựa trên nhiều tiêu chí
+        analysis.deletion_candidates = this.identifyDeletionCandidates(data, analysis);
+        
+        // Tính điểm sức khỏe dữ liệu
+        analysis.data_health_score = this.calculateDataHealthScore(analysis);
+        
+        return analysis;
+    }
+
+    // 2. Tìm pattern trùng lặp thông minh
+    findDuplicatePatterns(data) {
+        const patterns = {};
+        const duplicates = [];
+        
+        for (let i = 0; i < data.length; i++) {
+            const item = data[i];
+            const key = this.generatePatternKey(item);
+            
+            if (patterns[key]) {
+                patterns[key].push(i);
+            } else {
+                patterns[key] = [i];
+            }
+        }
+
+        for (const [key, indices] of Object.entries(patterns)) {
+            if (indices.length > 1) {
+                duplicates.push({
+                    pattern: key,
+                    indices: indices,
+                    count: indices.length,
+                    keep_index: this.findBestQualityIndex(indices, data)
+                });
+            }
+        }
+
+        return duplicates;
+    }
+
+    // 3. Tính điểm chất lượng cho từng bản ghi
+    calculateQualityScores(data) {
+        return data.map((item, index) => {
+            let score = 0;
+            
+            const completeness = this.checkCompleteness(item);
+            score += completeness * 0.3;
+
+            const validity = this.checkValidity(item);
+            score += validity * 0.3;
+
+            const recency = this.checkRecency(item, index, data.length);
+            score += recency * 0.2;
+
+            const reliability = this.checkReliability(item);
+            score += reliability * 0.2;
+
+            return {
+                index,
+                score,
+                completeness,
+                validity,
+                recency,
+                reliability,
+                phien: item.phien,
+                ket_qua: item.ket_qua
+            };
+        });
+    }
+
+    // 4. Phát hiện cụm thời gian để xóa theo nhóm
+    findTemporalClusters(data) {
+        const clusters = [];
+        let current_cluster = [];
+        const time_threshold = 5;
+
+        for (let i = 1; i < data.length; i++) {
+            const gap = Math.abs(data[i].phien - data[i-1].phien);
+            
+            if (gap <= time_threshold) {
+                if (current_cluster.length === 0) {
+                    current_cluster.push(i-1);
+                }
+                current_cluster.push(i);
+            } else {
+                if (current_cluster.length > 0) {
+                    clusters.push({
+                        indices: current_cluster,
+                        size: current_cluster.length,
+                        start_phien: data[current_cluster[0]].phien,
+                        end_phien: data[current_cluster[current_cluster.length-1]].phien
+                    });
+                    current_cluster = [];
+                }
+            }
+        }
+
+        return clusters;
+    }
+
+    // 5. Tính điểm outlier cho từng bản ghi
+    calculateOutlierScores(data) {
+        const scores = [];
+        const values = data.map(item => item.tong || 0);
+        
+        const mean = values.reduce((a, b) => a + b, 0) / values.length;
+        const std = Math.sqrt(values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / values.length);
+        
+        for (let i = 0; i < data.length; i++) {
+            const value = data[i].tong || 0;
+            const z_score = Math.abs((value - mean) / (std || 1));
+            scores.push({
+                index: i,
+                z_score: z_score,
+                is_outlier: z_score > 2.5,
+                value: value,
+                phien: data[i].phien
+            });
+        }
+        
+        return scores;
+    }
+
+    // 6. Xác định ứng viên xóa thông minh
+    identifyDeletionCandidates(data, analysis) {
+        const candidates = [];
+        
+        // Đánh dấu các bản ghi chất lượng thấp
+        analysis.quality_scores.forEach((q, index) => {
+            if (q.score < 0.3) {
+                candidates.push({
+                    index: index,
+                    reason: 'Chất lượng thấp',
+                    score: q.score,
+                    priority: 5,
+                    phien: data[index].phien
+                });
+                this.deletion_patterns.low_quality++;
+            }
+        });
+
+        // Đánh dấu các bản ghi trùng lặp
+        analysis.duplicate_patterns.forEach(dup => {
+            dup.indices.forEach(idx => {
+                if (idx !== dup.keep_index) {
+                    candidates.push({
+                        index: idx,
+                        reason: 'Trùng lặp',
+                        priority: 4,
+                        phien: data[idx].phien
+                    });
+                    this.deletion_patterns.duplicates++;
+                }
+            });
+        });
+
+        // Đánh dấu outlier
+        analysis.outlier_scores.forEach(out => {
+            if (out.is_outlier && out.z_score > 3) {
+                candidates.push({
+                    index: out.index,
+                    reason: 'Outlier cực đoan',
+                    priority: 3,
+                    z_score: out.z_score,
+                    phien: out.phien
+                });
+                this.deletion_patterns.outliers++;
+            }
+        });
+
+        // Đánh dấu các bản ghi cũ trong cluster lớn
+        analysis.temporal_clusters.forEach(cluster => {
+            if (cluster.size > 20) {
+                const to_remove = Math.floor(cluster.size * 0.3);
+                for (let i = 0; i < to_remove; i++) {
+                    candidates.push({
+                        index: cluster.indices[i],
+                        reason: 'Cluster cũ',
+                        priority: 2,
+                        phien: data[cluster.indices[i]].phien
+                    });
+                    this.deletion_patterns.clusters++;
+                }
+            }
+        });
+
+        const unique_candidates = this.removeDuplicateCandidates(candidates);
+        unique_candidates.sort((a, b) => a.priority - b.priority);
+
+        return unique_candidates;
+    }
+
+    // 7. Thực hiện xóa thông minh
+    smartDeletion(data, target_remove_count = null) {
+        const analysis = this.analyzeDataForDeletion(data);
+        
+        if (analysis.deletion_candidates.length === 0) {
+            return {
+                deleted: [],
+                kept: data,
+                message: 'Không có dữ liệu cần xóa',
+                deleted_count: 0,
+                kept_count: data.length
+            };
+        }
+
+        let remove_count = target_remove_count || Math.min(
+            analysis.deletion_candidates.length,
+            Math.floor(data.length * 0.1)
+        );
+
+        // Không xóa quá 50% dữ liệu
+        if (remove_count > data.length * 0.5) {
+            remove_count = Math.floor(data.length * 0.5);
+        }
+
+        const indices_to_delete = analysis.deletion_candidates
+            .slice(0, remove_count)
+            .map(c => c.index);
+
+        const kept_data = data.filter((_, index) => !indices_to_delete.includes(index));
+        const deleted_data = data.filter((_, index) => indices_to_delete.includes(index));
+
+        // Cập nhật thống kê
+        this.deletion_history.push({
+            timestamp: vnNow(),
+            deleted_count: deleted_data.length,
+            kept_count: kept_data.length,
+            reasons: analysis.deletion_candidates.slice(0, remove_count).map(c => c.reason),
+            patterns: { ...this.deletion_patterns }
+        });
+
+        this.deletion_count += deleted_data.length;
+        this.total_deleted_sessions += deleted_data.length;
+        this.last_deletion_time = vnNow();
+
+        // Reset patterns
+        this.deletion_patterns = {
+            duplicates: 0,
+            outliers: 0,
+            low_quality: 0,
+            old_data: 0,
+            clusters: 0
+        };
+
+        return {
+            deleted: deleted_data,
+            kept: kept_data,
+            deleted_count: deleted_data.length,
+            kept_count: kept_data.length,
+            analysis: analysis,
+            summary: {
+                total_deleted: this.total_deleted_sessions,
+                last_deletion: this.last_deletion_time,
+                deletion_rate: (this.total_deleted_sessions / data.length * 100).toFixed(2) + '%'
+            },
+            message: `Đã xóa ${deleted_data.length} bản ghi, giữ lại ${kept_data.length} bản ghi`
+        };
+    }
+
+    // 8. Xóa theo chiến lược thích ứng
+    adaptiveDeletion(data, strategy = 'balanced') {
+        const strategies = {
+            aggressive: 0.2,
+            balanced: 0.1,
+            conservative: 0.05
+        };
+
+        const remove_ratio = strategies[strategy] || strategies.balanced;
+        const remove_count = Math.floor(data.length * remove_ratio);
+
+        return this.smartDeletion(data, remove_count);
+    }
+
+    // 9. Xóa theo chu kỳ
+    cyclicDeletion(data, interval_days = 7) {
+        const now = new Date();
+        const cutoff = new Date(now.getTime() - interval_days * 24 * 60 * 60 * 1000);
+        
+        const old_data = data.filter(item => {
+            const item_date = new Date(item.timestamp || item.last_updated || vnNow());
+            return item_date < cutoff;
+        });
+
+        if (old_data.length === 0) {
+            return {
+                deleted: [],
+                kept: data,
+                message: 'Không có dữ liệu cũ hơn ' + interval_days + ' ngày',
+                deleted_count: 0,
+                kept_count: data.length
+            };
+        }
+
+        const to_delete = old_data.slice(0, Math.floor(old_data.length * 0.5));
+        const kept_data = data.filter(item => !to_delete.includes(item));
+
+        this.deletion_patterns.old_data += to_delete.length;
+
+        return {
+            deleted: to_delete,
+            kept: kept_data,
+            deleted_count: to_delete.length,
+            kept_count: kept_data.length,
+            message: `Đã xóa ${to_delete.length} bản ghi cũ hơn ${interval_days} ngày`
+        };
+    }
+
+    // 10. Xóa ngẫu nhiên có kiểm soát
+    controlledRandomDeletion(data, percentage = 5) {
+        if (data.length === 0 || percentage <= 0) {
+            return {
+                deleted: [],
+                kept: data,
+                message: 'Không có dữ liệu hoặc percentage không hợp lệ'
+            };
+        }
+
+        const shuffled = [...data];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+
+        const delete_count = Math.floor(data.length * (percentage / 100));
+        const to_delete = shuffled.slice(0, delete_count);
+        const kept_data = data.filter(item => !to_delete.includes(item));
+
+        return {
+            deleted: to_delete,
+            kept: kept_data,
+            deleted_count: to_delete.length,
+            kept_count: kept_data.length,
+            message: `Đã xóa ngẫu nhiên ${delete_count} bản ghi (${percentage}%)`
+        };
+    }
+
+    // 11. Xóa dựa trên độ tuổi dữ liệu
+    ageBasedDeletion(data, max_age_phien = 100) {
+        const current_max = Math.max(...data.map(d => d.phien || 0));
+        const cutoff_phien = current_max - max_age_phien;
+
+        const old_data = data.filter(item => (item.phien || 0) < cutoff_phien);
+        const kept_data = data.filter(item => (item.phien || 0) >= cutoff_phien);
+
+        if (old_data.length === 0) {
+            return {
+                deleted: [],
+                kept: data,
+                message: 'Không có dữ liệu cũ hơn ' + max_age_phien + ' phiên'
+            };
+        }
+
+        return {
+            deleted: old_data,
+            kept: kept_data,
+            deleted_count: old_data.length,
+            kept_count: kept_data.length,
+            message: `Đã xóa ${old_data.length} bản ghi cũ hơn ${max_age_phien} phiên`
+        };
+    }
+
+    // Helper methods
+    generatePatternKey(item) {
+        return `${item.ket_qua || ''}_${item.tong || 0}_${item.xuc_xac_1 || 0}_${item.xuc_xac_2 || 0}_${item.xuc_xac_3 || 0}`;
+    }
+
+    findBestQualityIndex(indices, data) {
+        let best_index = indices[0];
+        let best_score = -1;
+
+        indices.forEach(idx => {
+            const score = this.calculateSingleQualityScore(data[idx]);
+            if (score > best_score) {
+                best_score = score;
+                best_index = idx;
+            }
+        });
+
+        return best_index;
+    }
+
+    calculateSingleQualityScore(item) {
+        let score = 0;
+        const fields = ['phien', 'ket_qua', 'tong', 'xuc_xac_1', 'xuc_xac_2', 'xuc_xac_3'];
+        const completeness = fields.filter(f => item[f] !== undefined && item[f] !== null && item[f] !== '').length / fields.length;
+        score += completeness * 0.4;
+
+        const isValid = (item.tong || 0) >= 3 && (item.tong || 0) <= 18;
+        score += isValid ? 0.3 : 0;
+
+        const diceValid = [1,2,3].every(i => {
+            const val = item[`xuc_xac_${i}`];
+            return val >= 1 && val <= 6;
+        });
+        score += diceValid ? 0.3 : 0;
+
+        return score;
+    }
+
+    checkCompleteness(item) {
+        const fields = ['phien', 'ket_qua', 'tong', 'xuc_xac_1', 'xuc_xac_2', 'xuc_xac_3'];
+        const filled = fields.filter(f => item[f] !== undefined && item[f] !== null && item[f] !== '').length;
+        return filled / fields.length;
+    }
+
+    checkValidity(item) {
+        if (item.tong < 3 || item.tong > 18) return 0;
+        if (item.xuc_xac_1 < 1 || item.xuc_xac_1 > 6) return 0;
+        if (item.xuc_xac_2 < 1 || item.xuc_xac_2 > 6) return 0;
+        if (item.xuc_xac_3 < 1 || item.xuc_xac_3 > 6) return 0;
+        if (item.xuc_xac_1 + item.xuc_xac_2 + item.xuc_xac_3 !== item.tong) return 0.5;
+        return 1;
+    }
+
+    checkRecency(item, index, total) {
+        const recency = 1 - (index / total);
+        return Math.max(0, recency);
+    }
+
+    checkReliability(item) {
+        let score = 0;
+        if (item.source === 'official') score += 0.3;
+        if (item.verified) score += 0.3;
+        if (item.confidence && item.confidence > 0.8) score += 0.4;
+        return Math.min(1, score + 0.3);
+    }
+
+    removeDuplicateCandidates(candidates) {
+        const seen = new Set();
+        return candidates.filter(c => {
+            if (seen.has(c.index)) return false;
+            seen.add(c.index);
+            return true;
+        });
+    }
+
+    calculateDataHealthScore(analysis) {
+        let score = 100;
+        
+        // Trừ điểm cho các vấn đề
+        score -= analysis.duplicate_patterns.length * 2;
+        score -= analysis.outlier_scores.filter(o => o.is_outlier).length * 1.5;
+        score -= analysis.quality_scores.filter(q => q.score < 0.5).length * 1;
+        
+        // Đảm bảo score trong khoảng 0-100
+        return Math.max(0, Math.min(100, score));
+    }
+
+    getDeletionStats() {
+        return {
+            total_deletions: this.total_deleted_sessions,
+            last_deletion: this.last_deletion_time,
+            history: this.deletion_history.slice(-10),
+            average_deletion_rate: this.deletion_history.length > 0 
+                ? (this.deletion_history.reduce((sum, h) => sum + h.deleted_count, 0) / this.deletion_history.length)
+                : 0,
+            patterns: this.deletion_patterns
+        };
+    }
+
+    // 12. Xóa thông minh tổng hợp
+    comprehensiveDeletion(data) {
+        let result = { ...data };
+        let total_deleted = 0;
+        let deletion_results = [];
+
+        // Bước 1: Xóa theo tuổi dữ liệu
+        const age_result = this.ageBasedDeletion(result, 200);
+        if (age_result.deleted_count > 0) {
+            total_deleted += age_result.deleted_count;
+            deletion_results.push({ step: 'Age-based', ...age_result });
+            result = age_result.kept;
+        }
+
+        // Bước 2: Xóa trùng lặp và chất lượng thấp
+        const smart_result = this.smartDeletion(result);
+        if (smart_result.deleted_count > 0) {
+            total_deleted += smart_result.deleted_count;
+            deletion_results.push({ step: 'Smart deletion', ...smart_result });
+            result = smart_result.kept;
+        }
+
+        // Bước 3: Xóa cluster nếu cần
+        const analysis = this.analyzeDataForDeletion(result);
+        if (analysis.temporal_clusters.length > 0 && analysis.temporal_clusters.some(c => c.size > 30)) {
+            const cluster_result = this.smartDeletion(result, Math.floor(result.length * 0.05));
+            if (cluster_result.deleted_count > 0) {
+                total_deleted += cluster_result.deleted_count;
+                deletion_results.push({ step: 'Cluster cleanup', ...cluster_result });
+                result = cluster_result.kept;
+            }
+        }
+
+        return {
+            deleted_count: total_deleted,
+            kept: result,
+            kept_count: result.length,
+            steps: deletion_results,
+            message: `Hoàn thành xóa tổng hợp: đã xóa ${total_deleted} bản ghi`
+        };
+    }
+}
+
+// ============================================================
+// 2. HÀM XÓA DỮ LIỆU ĐỊNH KỲ
+// ============================================================
+const randomDeletion = new RandomDeletionAlgorithm();
+
+function performScheduledDeletion() {
+    console.log('\n🧹 BẮT ĐẦU XÓA DỮ LIỆU THÔNG MINH');
+    console.log('═══════════════════════════════════════════');
+    
+    const history = loadHistory();
+    
+    if (history.length < 50) {
+        console.log('📊 Dữ liệu quá ít (< 50), bỏ qua xóa');
+        return;
+    }
+
+    console.log(`📚 Tổng dữ liệu hiện tại: ${history.length.toLocaleString()} phiên`);
+
+    // Sử dụng chiến lược tổng hợp
+    const result = randomDeletion.comprehensiveDeletion(history);
+    
+    if (result.deleted_count > 0) {
+        // Lưu log xóa
+        const deletion_log = {
+            timestamp: vnNow(),
+            deleted_count: result.deleted_count,
+            kept_count: result.kept_count,
+            total_before: history.length,
+            total_after: result.kept_count,
+            steps: result.steps.map(s => ({
+                step: s.step,
+                deleted: s.deleted_count,
+                kept: s.kept_count
+            })),
+            stats: randomDeletion.getDeletionStats()
+        };
+
+        // Lưu log
+        let logs = [];
+        try {
+            if (fs.existsSync(DELETION_LOG_FILE)) {
+                logs = JSON.parse(fs.readFileSync(DELETION_LOG_FILE, 'utf-8'));
+            }
+        } catch (e) {}
+        
+        logs.push(deletion_log);
+        if (logs.length > 100) logs = logs.slice(-100);
+        
+        fs.writeFileSync(DELETION_LOG_FILE, JSON.stringify(logs, null, 2));
+        
+        // Backup dữ liệu xóa
+        const backup_dir = 'database/backups';
+        if (!fs.existsSync(backup_dir)) {
+            fs.mkdirSync(backup_dir, { recursive: true });
+        }
+        
+        // Lưu riêng từng bước xóa
+        result.steps.forEach((step, idx) => {
+            if (step.deleted && step.deleted.length > 0) {
+                const backup_file = path.join(backup_dir, `deleted_${Date.now()}_step${idx+1}.json`);
+                fs.writeFileSync(backup_file, JSON.stringify(step.deleted, null, 2));
+            }
+        });
+        
+        // Lưu dữ liệu đã xóa tổng hợp
+        const backup_file = path.join(backup_dir, `deleted_summary_${Date.now()}.json`);
+        const deleted_data = history.filter(item => !result.kept.includes(item));
+        fs.writeFileSync(backup_file, JSON.stringify(deleted_data, null, 2));
+        
+        // Cập nhật dữ liệu chính
+        saveHistory(result.kept);
+        
+        // Cập nhật stats
+        stats.total_deleted = (stats.total_deleted || 0) + result.deleted_count;
+        stats.last_deletion = vnNow();
+        saveStatsFile();
+        
+        console.log(`✅ ĐÃ XÓA: ${result.deleted_count.toLocaleString()} bản ghi`);
+        console.log(`📦 GIỮ LẠI: ${result.kept_count.toLocaleString()} bản ghi`);
+        console.log(`📊 TỔNG ĐÃ XÓA: ${stats.total_deleted.toLocaleString()} bản ghi`);
+        console.log(`📝 LOG XÓA: ${DELETION_LOG_FILE}`);
+        console.log(`💾 BACKUP: ${backup_dir}`);
+        
+        // Hiển thị phân tích
+        console.log('\n📊 PHÂN TÍCH XÓA:');
+        const analysis = randomDeletion.analyzeDataForDeletion(history);
+        console.log(`   - Điểm sức khỏe dữ liệu: ${analysis.data_health_score}/100`);
+        console.log(`   - Trùng lặp: ${analysis.duplicate_patterns.length} pattern`);
+        console.log(`   - Outlier: ${analysis.outlier_scores.filter(o => o.is_outlier).length} bản ghi`);
+        console.log(`   - Chất lượng thấp: ${analysis.quality_scores.filter(q => q.score < 0.5).length} bản ghi`);
+    } else {
+        console.log('ℹ️ Không có dữ liệu cần xóa');
+    }
+}
+
+// ============================================================
+// 3. THUẬT TOÁN DỰ ĐOÁN V4 (GIỮ NGUYÊN)
+// ============================================================
 class TX_LogicPen_V4 {
     constructor() {
         this.error_streak = 0;
@@ -59,7 +700,7 @@ class TX_LogicPen_V4 {
             .map(s => s.tong);
     }
 
-    // --- THUẬT TOÁN CŨ (GIỮ NGUYÊN 100%) ---
+    // Các phương thức dự đoán (giữ nguyên)
     cauSap(arr) {
         if (arr.length < 2) return null;
         let length = 1;
@@ -139,7 +780,6 @@ class TX_LogicPen_V4 {
         return null;
     }
 
-    // --- THUẬT TOÁN MỚI (THÊM 100%) ---
     fibonacciPrediction(arr) {
         if (arr.length < this.fibonacci_sequence.length) return null;
         
@@ -421,7 +1061,9 @@ class TX_LogicPen_V4 {
 
 const predictor = new TX_LogicPen_V4();
 
-// --- HÀM LƯU DỮ LIỆU ---
+// ============================================================
+// 4. HÀM LƯU DỮ LIỆU (CÓ HỖ TRỢ XÓA)
+// ============================================================
 function loadHistory() {
     try {
         if (fs.existsSync(DATA_FILE)) {
@@ -445,7 +1087,8 @@ function saveHistory(history) {
         history: limitedHistory,
         total_sessions: limitedHistory.length,
         max_storage: MAX_STORAGE,
-        last_updated: vnNow()
+        last_updated: vnNow(),
+        total_deleted: stats.total_deleted || 0
     }, null, 2));
     
     console.log(`💾 Đã lưu ${limitedHistory.length}/${MAX_STORAGE} phiên dữ liệu`);
@@ -461,6 +1104,8 @@ function saveStatsFile() {
         min_data_required: MIN_DATA_FOR_PREDICTION,
         max_storage: MAX_STORAGE,
         prediction_started: stats.prediction_started,
+        total_deleted: stats.total_deleted || 0,
+        last_deletion: stats.last_deletion || null,
         last_updated: vnNow()
     }, null, 2));
 }
@@ -529,8 +1174,10 @@ function autoVerify(history) {
     }
 }
 
+// ============================================================
+// 5. HÀM DỰ ĐOÁN
+// ============================================================
 function makePrediction(history) {
-    // Chỉ cần 5 phiên là dự đoán được
     if (history.length < MIN_DATA_FOR_PREDICTION) {
         return {
             error: true,
@@ -551,7 +1198,6 @@ function makePrediction(history) {
         
         const nextPhien = ph + 1;
         
-        // Lưu dự đoán vào lịch sử
         const prediction_record = {
             phien: nextPhien,
             prediction: r.pred,
@@ -568,7 +1214,6 @@ function makePrediction(history) {
         predictions_history.push(prediction_record);
         savePredictions(predictions_history);
         
-        // Cập nhật stats
         stats.total_predictions_made++;
         stats.last_prediction = {
             phien: nextPhien,
@@ -577,7 +1222,6 @@ function makePrediction(history) {
         };
         saveStatsFile();
         
-        // Format JSON theo yêu cầu
         return {
             "phiên": cur.phien,
             "xúc xắc 1": cur.xuc_xac_1 || 0,
@@ -598,12 +1242,13 @@ function makePrediction(history) {
     }
 }
 
-// --- TẠO WEB SERVER VỚI API ---
+// ============================================================
+// 6. WEB SERVER VỚI API
+// ============================================================
 const server = http.createServer((req, res) => {
     const parsedUrl = url.parse(req.url, true);
     const pathname = parsedUrl.pathname;
     
-    // CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -655,41 +1300,94 @@ const server = http.createServer((req, res) => {
             correct: stats.correct,
             wrong: stats.wrong,
             total_verified: stats.total,
+            total_deleted: stats.total_deleted || 0,
+            last_deletion: stats.last_deletion || null,
+            deletion_stats: randomDeletion.getDeletionStats(),
             id: "@tranhoang2286",
             timestamp: vnNow()
         }, null, 2));
         return;
     }
     
-    // Trang chủ - health check
+    // API xóa dữ liệu thủ công
+    if (pathname === '/api/lonsun/delete' && req.method === 'POST') {
+        const history = loadHistory();
+        const strategy = parsedUrl.query.strategy || 'balanced';
+        const result = randomDeletion.adaptiveDeletion(history, strategy);
+        
+        if (result.deleted_count > 0) {
+            saveHistory(result.kept);
+            stats.total_deleted = (stats.total_deleted || 0) + result.deleted_count;
+            stats.last_deletion = vnNow();
+            saveStatsFile();
+        }
+        
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+            success: true,
+            ...result,
+            id: "@tranhoang2286",
+            timestamp: vnNow()
+        }, null, 2));
+        return;
+    }
+    
+    // API lấy log xóa
+    if (pathname === '/api/lonsun/deletion-log' && req.method === 'GET') {
+        let logs = [];
+        try {
+            if (fs.existsSync(DELETION_LOG_FILE)) {
+                logs = JSON.parse(fs.readFileSync(DELETION_LOG_FILE, 'utf-8'));
+            }
+        } catch (e) {}
+        
+        const limit = parseInt(parsedUrl.query.limit) || 20;
+        const recent = logs.slice(-limit);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+            success: true,
+            total: logs.length,
+            logs: recent,
+            id: "@tranhoang2286",
+            timestamp: vnNow()
+        }, null, 2));
+        return;
+    }
+    
+    // Trang chủ
     if (pathname === '/') {
         const history = loadHistory();
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({
             status: 'running',
-            service: 'SUNWIN TX Collector',
-            version: '2.0.0',
+            service: 'SUNWIN TX Collector V2',
+            version: '2.1.0',
             predictions_made: stats.total_predictions_made || 0,
             accuracy: stats.total > 0 ? ((stats.correct / stats.total) * 100).toFixed(2) + '%' : '0%',
             data_sessions: history.length,
             min_required: MIN_DATA_FOR_PREDICTION,
+            total_deleted: stats.total_deleted || 0,
+            deletion_enabled: true,
             api_endpoints: [
-                '/api/lonsun/tx - Dự đoán phiên tiếp theo',
-                '/api/lonsun/history - Lịch sử dự đoán',
-                '/api/lonsun/stats - Thống kê'
+                'GET /api/lonsun/tx - Dự đoán phiên tiếp theo',
+                'GET /api/lonsun/history - Lịch sử dự đoán',
+                'GET /api/lonsun/stats - Thống kê',
+                'POST /api/lonsun/delete?strategy=balanced - Xóa dữ liệu thủ công',
+                'GET /api/lonsun/deletion-log - Xem log xóa'
             ],
+            deletion_strategies: ['aggressive', 'balanced', 'conservative'],
             id: '@tranhoang2286',
             timestamp: vnNow()
         }, null, 2));
         return;
     }
     
-    // 404
     res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
         error: true,
         message: 'Không tìm thấy endpoint',
-        available: ['/api/lonsun/tx', '/api/lonsun/history', '/api/lonsun/stats']
+        available: ['/api/lonsun/tx', '/api/lonsun/history', '/api/lonsun/stats', '/api/lonsun/delete', '/api/lonsun/deletion-log']
     }, null, 2));
 });
 
@@ -699,6 +1397,8 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`   GET /api/lonsun/tx - Dự đoán phiên tiếp theo`);
     console.log(`   GET /api/lonsun/history - Xem lịch sử dự đoán`);
     console.log(`   GET /api/lonsun/stats - Xem thống kê`);
+    console.log(`   POST /api/lonsun/delete?strategy=balanced - Xóa dữ liệu thủ công`);
+    console.log(`   GET /api/lonsun/deletion-log - Xem log xóa`);
 });
 
 function safeInt(v, d = 0) {
@@ -706,19 +1406,21 @@ function safeInt(v, d = 0) {
     return isNaN(parsed) ? d : parsed;
 }
 
-// --- COLLECTOR CHẠY NỀN ---
+// ============================================================
+// 7. COLLECTOR CHÍNH
+// ============================================================
 async function collect() {
-    console.log("🚀 SUNWIN TX COLLECTOR - KHỞI ĐỘNG");
+    console.log("🚀 SUNWIN TX COLLECTOR V2.1 - KHỞI ĐỘNG");
     console.log("═══════════════════════════════════════════");
     console.log(`📊 Yêu cầu dữ liệu tối thiểu: ${MIN_DATA_FOR_PREDICTION} phiên`);
     console.log(`🎯 Giới hạn dự đoán: ${MAX_PREDICTIONS.toLocaleString()} phiên`);
     console.log(`💾 Giới hạn lưu trữ: ${MAX_STORAGE.toLocaleString()} phiên`);
     console.log(`🧠 Thuật toán: 6 thuật toán cũ + 6 thuật toán mới`);
+    console.log(`🗑️  Xóa thông minh: Mỗi ${DELETION_INTERVAL/3600000} giờ`);
     console.log(`👤 ID: @tranhoang2286`);
     console.log(`🌐 API: http://0.0.0.0:${PORT}/api/lonsun/tx`);
     console.log("═══════════════════════════════════════════\n");
     
-    // Tải dữ liệu
     let history = loadHistory();
     predictions_history = loadPredictions();
     
@@ -730,11 +1432,14 @@ async function collect() {
             const savedStats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf-8'));
             stats = { ...stats, ...savedStats };
             console.log(`📈 Đã dự đoán ${stats.total_predictions_made.toLocaleString()}/${MAX_PREDICTIONS.toLocaleString()} phiên`);
-            console.log(`📊 Tỷ lệ đúng: ${((stats.correct/Math.max(stats.total,1))*100).toFixed(1)}% (${stats.correct}/${stats.total})\n`);
+            console.log(`📊 Tỷ lệ đúng: ${((stats.correct/Math.max(stats.total,1))*100).toFixed(1)}% (${stats.correct}/${stats.total})`);
+            console.log(`🗑️  Đã xóa: ${(stats.total_deleted || 0).toLocaleString()} bản ghi`);
+            console.log(`📅 Lần xóa cuối: ${stats.last_deletion || 'Chưa có'}\n`);
         }
     } catch (e) {}
     
-    // Vòng lặp thu thập dữ liệu
+    let last_deletion_check = Date.now();
+    
     while (true) {
         try {
             const response = await axios.get(API_URL, { timeout: 15000 });
@@ -788,17 +1493,35 @@ async function collect() {
         } catch (e) {
             console.error(`❌ Lỗi collector: ${e.message}`);
         }
+        
+        // Kiểm tra xóa định kỳ
+        if (Date.now() - last_deletion_check >= DELETION_INTERVAL) {
+            performScheduledDeletion();
+            last_deletion_check = Date.now();
+            
+            // Reload history sau khi xóa
+            history = loadHistory();
+        }
+        
         await new Promise(resolve => setTimeout(resolve, 3000));
     }
 }
 
+// ============================================================
+// 8. XỬ LÝ THOÁT
+// ============================================================
 process.on('SIGINT', () => {
     console.log("\n🛑 Đang dừng chương trình...");
     saveStatsFile();
     savePredictions(predictions_history);
     console.log("✅ Đã lưu thống kê và dự đoán!");
+    
+    // Lưu log xóa cuối cùng
+    console.log("📊 Thống kê xóa cuối cùng:", randomDeletion.getDeletionStats());
     process.exit();
 });
 
-// Chạy chương trình
+// ============================================================
+// 9. KHỞI CHẠY
+// ============================================================
 collect().catch(console.error);
